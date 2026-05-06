@@ -1,0 +1,69 @@
+# Release workflow for the Multi-Platform Log Correlation Pipeline.
+# This workflow enforces the same verification gates before anything can be
+# treated as release-ready on the dedicated release branch.
+
+name: release-pipeline
+
+on:
+  # Pull requests into the release branch must pass verification before merge.
+  pull_request:
+    branches:
+      - release
+  # A push to the release branch indicates a candidate build that can be
+  # promoted only after the verification job succeeds.
+  push:
+    branches:
+      - release
+  # Manual dispatch is useful when checking the workflow from the Actions tab.
+  workflow_dispatch:
+
+jobs:
+  verify:
+    # The release branch must never bypass the project checks.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on Linux collector
+        run: shellcheck scripts/linux_collector.sh
+
+      - name: Run Python syntax check
+        run: python -m py_compile scripts/analyzer.py
+
+      - name: Verify required files and folders exist
+        run: |
+          test -f scripts/linux_collector.sh
+          test -f scripts/windows_collector.ps1
+          test -f scripts/analyzer.py
+          test -f README.md
+          test -f requirements.txt
+          test -d scripts
+          test -d data
+          test -d logs
+          test -d output
+          test -d .github/workflows
+
+  release:
+    # Only build a release artifact when the verification job passes.
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Confirm release eligibility
+        run: |
+          echo "Verification succeeded on the release branch."
+          echo "This build is release-ready because all CI gates passed."
+
