@@ -1,0 +1,56 @@
+Multi-Platform Log Correlation Pipeline
+Final Security Report
+========================================================================
+Generated at: 2026-05-06 23:29:51
+
+Summary
+------------------------------------------------------------------------
+Linux records processed: 8
+Windows records processed: 5
+Known machines loaded: 3
+Total findings: 13
+CRITICAL findings: 1
+HIGH findings: 1
+MEDIUM findings: 11
+
+Categorized Risks
+------------------------------------------------------------------------
+CRITICAL (1)
+  - May  6 12:45:03 | 198.51.100.42 | alice | Unknown IP | IP address is not listed in known_machines.csv.
+
+HIGH (1)
+  - May  6 08:11:01 | 203.0.113.10 | root | Brute force | 7 failed attempts detected for the same IP.
+
+MEDIUM (11)
+  - 2026-05-06T08:11:01 | 203.0.113.10 | root | Off-hours login | Login attempt occurred outside standard office hours.
+  - 2026-05-06T08:11:12 | 203.0.113.10 | root | Off-hours login | Login attempt occurred outside standard office hours.
+  - 2026-05-06T18:03:21 | 192.0.2.77 | svc-backup | Off-hours login | Login attempt occurred outside standard office hours.
+  - 2026-05-06T22:17:08 | 198.51.100.18 | jdoe | Off-hours login | Login attempt occurred outside standard office hours.
+  - May  6 08:11:01 | 203.0.113.10 | root | Off-hours login | Login attempt occurred outside standard office hours.
+  - May  6 08:11:12 | 203.0.113.10 | root | Off-hours login | Login attempt occurred outside standard office hours.
+  - May  6 08:11:23 | 203.0.113.10 | root | Off-hours login | Login attempt occurred outside standard office hours.
+  - May  6 08:11:34 | 203.0.113.10 | root | Off-hours login | Login attempt occurred outside standard office hours.
+  - May  6 08:11:45 | 203.0.113.10 | root | Off-hours login | Login attempt occurred outside standard office hours.
+  - May  6 18:03:21 | 192.0.2.77 | svc-backup | Off-hours login | Login attempt occurred outside standard office hours.
+  - May  6 22:17:08 | 198.51.100.18 | jdoe | Off-hours login | Login attempt occurred outside standard office hours.
+
+Event Timeline
+------------------------------------------------------------------------
+May  6 12:45:03 | CRITICAL | 198.51.100.42 | alice | linux | Unknown IP
+May  6 08:11:01 | HIGH | 203.0.113.10 | root | linux | Brute force
+2026-05-06T08:11:01 | MEDIUM | 203.0.113.10 | root | windows | Off-hours login
+2026-05-06T08:11:12 | MEDIUM | 203.0.113.10 | root | windows | Off-hours login
+2026-05-06T18:03:21 | MEDIUM | 192.0.2.77 | svc-backup | windows | Off-hours login
+2026-05-06T22:17:08 | MEDIUM | 198.51.100.18 | jdoe | windows | Off-hours login
+May  6 08:11:01 | MEDIUM | 203.0.113.10 | root | linux | Off-hours login
+May  6 08:11:12 | MEDIUM | 203.0.113.10 | root | linux | Off-hours login
+May  6 08:11:23 | MEDIUM | 203.0.113.10 | root | linux | Off-hours login
+May  6 08:11:34 | MEDIUM | 203.0.113.10 | root | linux | Off-hours login
+May  6 08:11:45 | MEDIUM | 203.0.113.10 | root | linux | Off-hours login
+May  6 18:03:21 | MEDIUM | 192.0.2.77 | svc-backup | linux | Off-hours login
+May  6 22:17:08 | MEDIUM | 198.51.100.18 | jdoe | linux | Off-hours login
+
+Notes
+------------------------------------------------------------------------
+This report was generated automatically from the current correlation results.
+Timestamps are preserved from the collector data to support investigation.

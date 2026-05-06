@@ -35,6 +35,7 @@ DATA_DIR = BASE_DIR / "data"
 LINUX_DATA_FILE = DATA_DIR / "linux_data.json"
 WINDOWS_DATA_FILE = DATA_DIR / "windows_data.csv"
 KNOWN_MACHINES_FILE = BASE_DIR / "known_machines.csv"
+OUTPUT_REPORT_FILE = BASE_DIR / "output" / "final_security_report.txt"
 
 # A dedicated logger name keeps this configuration isolated from other modules.
 LOGGER_NAME = "multi_platform_log_correlation_pipeline"
@@ -449,6 +450,107 @@ def _summarize_findings(findings: list[dict[str, str]]) -> dict[str, int]:
     return summary
 
 
+def _build_report_lines(
+    findings: list[dict[str, str]],
+    summary: dict[str, int],
+    linux_count: int,
+    windows_count: int,
+    known_machine_count: int,
+) -> list[str]:
+    """Assemble a readable report body from the current analysis results."""
+
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines: list[str] = [
+        "Multi-Platform Log Correlation Pipeline",
+        "Final Security Report",
+        "=" * 72,
+        f"Generated at: {generated_at}",
+        "",
+        "Summary",
+        "-" * 72,
+        f"Linux records processed: {linux_count}",
+        f"Windows records processed: {windows_count}",
+        f"Known machines loaded: {known_machine_count}",
+        f"Total findings: {len(findings)}",
+        f"CRITICAL findings: {summary['CRITICAL']}",
+        f"HIGH findings: {summary['HIGH']}",
+        f"MEDIUM findings: {summary['MEDIUM']}",
+        "",
+        "Categorized Risks",
+        "-" * 72,
+    ]
+
+    severity_labels = ["CRITICAL", "HIGH", "MEDIUM"]
+    for severity in severity_labels:
+        severity_findings = [finding for finding in findings if finding["severity"] == severity]
+        lines.append(f"{severity} ({len(severity_findings)})")
+        if not severity_findings:
+            lines.append("  - None detected")
+        else:
+            for finding in severity_findings:
+                lines.append(
+                    "  - "
+                    f"{finding['timestamp']} | "
+                    f"{finding['ip']} | "
+                    f"{finding['username']} | "
+                    f"{finding['rule']} | "
+                    f"{finding['detail']}"
+                )
+        lines.append("")
+
+    lines.extend(
+        [
+            "Event Timeline",
+            "-" * 72,
+        ]
+    )
+
+    if findings:
+        for finding in findings:
+            lines.append(
+                f"{finding['timestamp']} | {finding['severity']} | "
+                f"{finding['ip']} | {finding['username']} | {finding['source']} | "
+                f"{finding['rule']}"
+            )
+    else:
+        lines.append("No findings were generated.")
+
+    lines.extend(
+        [
+            "",
+            "Notes",
+            "-" * 72,
+            "This report was generated automatically from the current correlation results.",
+            "Timestamps are preserved from the collector data to support investigation.",
+            "",
+        ]
+    )
+
+    return lines
+
+
+def generate_final_security_report(
+    findings: list[dict[str, str]],
+    summary: dict[str, int],
+    linux_count: int,
+    windows_count: int,
+    known_machine_count: int,
+) -> Path:
+    """Write the Phase 8 report to disk in a readable, structured format."""
+
+    OUTPUT_REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    report_lines = _build_report_lines(
+        findings=findings,
+        summary=summary,
+        linux_count=linux_count,
+        windows_count=windows_count,
+        known_machine_count=known_machine_count,
+    )
+    OUTPUT_REPORT_FILE.write_text("\n".join(report_lines), encoding="utf-8")
+    log_info(f"Final security report written to {OUTPUT_REPORT_FILE}")
+    return OUTPUT_REPORT_FILE
+
+
 def _resolve_shell(executable_names: list[str]) -> str | None:
     """Return the first available shell or command executable from a candidate list."""
 
@@ -583,6 +685,15 @@ def main() -> None:
         f"HIGH={summary['HIGH']} "
         f"MEDIUM={summary['MEDIUM']}"
     )
+
+    report_path = generate_final_security_report(
+        findings=findings,
+        summary=summary,
+        linux_count=len(linux_data),
+        windows_count=len(windows_data),
+        known_machine_count=len(known_machines),
+    )
+    print(f"Report written to: {report_path}")
 
     for finding in findings:
         print(
