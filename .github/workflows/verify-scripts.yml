@@ -1,0 +1,45 @@
+# GitHub Actions workflow for Phase 1 repository verification.
+# This workflow only validates project structure and basic syntax checks.
+
+name: verify-scripts
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on Bash script
+        run: shellcheck scripts/linux_collector.sh
+
+      - name: Run Python syntax check
+        run: python -m py_compile scripts/analyzer.py
+
+      - name: Verify required files and folders exist
+        run: |
+          test -f scripts/linux_collector.sh
+          test -f scripts/windows_collector.ps1
+          test -f scripts/analyzer.py
+          test -f README.md
+          test -f requirements.txt
+          test -d scripts
+          test -d data
+          test -d logs
+          test -d output
+          test -d .github/workflows

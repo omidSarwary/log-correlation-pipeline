@@ -1,0 +1,3 @@
+# Phase 1 placeholder dependency list.
+# Runtime dependencies will be added when implementation phases begin.
+
