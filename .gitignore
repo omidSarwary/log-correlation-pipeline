@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 
+# Runtime logs are generated during execution and should not be committed.
+logs/*.log
