@@ -17,8 +17,9 @@ import csv
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
+from collections import defaultdict
 from pathlib import Path
-from typing import Iterable
 
 
 # The repository keeps runtime logs in the shared logs directory.
@@ -30,6 +31,7 @@ LOG_FILE = LOG_DIR / "system.log"
 DATA_DIR = BASE_DIR / "data"
 LINUX_DATA_FILE = DATA_DIR / "linux_data.json"
 WINDOWS_DATA_FILE = DATA_DIR / "windows_data.csv"
+KNOWN_MACHINES_FILE = BASE_DIR / "known_machines.csv"
 
 # A dedicated logger name keeps this configuration isolated from other modules.
 LOGGER_NAME = "multi_platform_log_correlation_pipeline"
@@ -251,21 +253,235 @@ def load_available_data() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     return linux_data, windows_data
 
 
-def main() -> None:
-    """Run the Phase 5 fallback path and print a short status summary."""
+def load_known_machines() -> dict[str, str]:
+    """Load the baseline machine list into a fast IP-to-machine dictionary."""
 
-    log_info("Phase 5 fallback system initialized.")
+    if not KNOWN_MACHINES_FILE.exists():
+        log_error(f"Baseline file missing: {KNOWN_MACHINES_FILE}")
+        return {}
+
+    machines: dict[str, str] = {}
+    try:
+        with KNOWN_MACHINES_FILE.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                ip_address = (row.get("IpAddress") or "").strip()
+                machine_name = (row.get("MachineName") or "").strip()
+                if ip_address:
+                    machines[ip_address] = machine_name or "unknown-machine"
+    except OSError as exc:
+        log_error(f"Failed to load known_machines.csv: {exc}")
+        return {}
+
+    log_info(f"Loaded {len(machines)} known machine records from baseline CSV.")
+    return machines
+
+
+def _parse_linux_timestamp(timestamp_text: str) -> datetime:
+    """Convert a Linux auth.log timestamp into a datetime object."""
+
+    # Linux auth logs do not store a year, so we anchor parsing to the current year.
+    return datetime.strptime(f"{datetime.now().year} {timestamp_text}", "%Y %b %d %H:%M:%S")
+
+
+def _parse_windows_timestamp(timestamp_text: str) -> datetime:
+    """Convert a Windows ISO timestamp into a datetime object."""
+
+    return datetime.fromisoformat(timestamp_text)
+
+
+def _is_off_hours(event_time: datetime) -> bool:
+    """Return True when a login occurs outside the standard workday."""
+
+    # The project definition treats logins before 09:00 and at or after 17:00 as off-hours.
+    return event_time.hour < 9 or event_time.hour >= 17
+
+
+def _normalize_linux_event(event: dict[str, str]) -> dict[str, str]:
+    """Normalize a Linux event into a common correlation structure."""
+
+    return {
+        "source": "linux",
+        "ip": (event.get("ip") or "").strip(),
+        "username": (event.get("username") or "").strip(),
+        "timestamp": (event.get("timestamp") or "").strip(),
+    }
+
+
+def _normalize_windows_event(event: dict[str, str]) -> dict[str, str]:
+    """Normalize a Windows event into a common correlation structure."""
+
+    return {
+        "source": "windows",
+        "ip": (event.get("IpAddress") or "").strip(),
+        "username": (event.get("TargetUserName") or "").strip(),
+        "timestamp": (event.get("TimeCreated") or "").strip(),
+    }
+
+
+def _build_event_stream(
+    linux_data: list[dict[str, str]],
+    windows_data: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Combine Linux and Windows records into one correlation-friendly stream."""
+
+    normalized_events = [_normalize_linux_event(event) for event in linux_data]
+    normalized_events.extend(_normalize_windows_event(event) for event in windows_data)
+    return normalized_events
+
+
+def correlate_events(
+    known_machines: dict[str, str],
+    linux_data: list[dict[str, str]],
+    windows_data: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Apply the Phase 6 correlation rules to the combined event stream."""
+
+    events = _build_event_stream(linux_data, windows_data)
+    failed_attempts_by_ip: dict[str, int] = defaultdict(int)
+    first_event_by_ip: dict[str, dict[str, str]] = {}
+    findings: list[dict[str, str]] = []
+    recorded_high_ips: set[str] = set()
+    recorded_unknown_ips: set[str] = set()
+
+    for event in events:
+        ip_address = event["ip"]
+        if not ip_address:
+            continue
+
+        # Track how many failures we have seen per source IP for brute-force detection.
+        failed_attempts_by_ip[ip_address] += 1
+
+        # Keep the first event so we can attach a stable timestamp to IP-level findings.
+        first_event_by_ip.setdefault(ip_address, event)
+
+        # Rule 1: flag any IP that is not part of the trusted baseline.
+        if ip_address not in known_machines and ip_address not in recorded_unknown_ips:
+            recorded_unknown_ips.add(ip_address)
+            findings.append(
+                {
+                    "severity": "CRITICAL",
+                    "rule": "Unknown IP",
+                    "ip": ip_address,
+                    "username": event["username"],
+                    "timestamp": event["timestamp"],
+                    "source": event["source"],
+                    "detail": "IP address is not listed in known_machines.csv.",
+                }
+            )
+            log_error(
+                f"CRITICAL Unknown IP detected: {ip_address} "
+                f"({event['source']} user={event['username']} time={event['timestamp']})"
+            )
+
+        # Rule 3: flag logins that occur outside normal business hours.
+        timestamp_text = event["timestamp"]
+        try:
+            event_time = (
+                _parse_linux_timestamp(timestamp_text)
+                if event["source"] == "linux"
+                else _parse_windows_timestamp(timestamp_text)
+            )
+        except ValueError:
+            log_warning(f"Unable to parse timestamp for off-hours detection: {timestamp_text}")
+            continue
+
+        if _is_off_hours(event_time):
+            findings.append(
+                {
+                    "severity": "MEDIUM",
+                    "rule": "Off-hours login",
+                    "ip": ip_address,
+                    "username": event["username"],
+                    "timestamp": timestamp_text,
+                    "source": event["source"],
+                    "detail": "Login attempt occurred outside standard office hours.",
+                }
+            )
+            log_warning(
+                f"MEDIUM Off-hours login detected: {ip_address} "
+                f"({event['source']} user={event['username']} time={timestamp_text})"
+            )
+
+    # Rule 2: once all events are counted, flag IPs that cross the brute-force threshold.
+    for ip_address, attempt_count in failed_attempts_by_ip.items():
+        if attempt_count >= 5 and ip_address not in recorded_high_ips:
+            recorded_high_ips.add(ip_address)
+            reference_event = first_event_by_ip[ip_address]
+            findings.append(
+                {
+                    "severity": "HIGH",
+                    "rule": "Brute force",
+                    "ip": ip_address,
+                    "username": reference_event["username"],
+                    "timestamp": reference_event["timestamp"],
+                    "source": reference_event["source"],
+                    "detail": f"{attempt_count} failed attempts detected for the same IP.",
+                }
+            )
+            log_warning(
+                f"HIGH Brute-force threshold reached for {ip_address} with {attempt_count} failed attempts."
+            )
+
+    severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}
+    findings.sort(
+        key=lambda item: (
+            severity_rank.get(item["severity"], 99),
+            item["timestamp"],
+            item["ip"],
+            item["rule"],
+        )
+    )
+    return findings
+
+
+def _summarize_findings(findings: list[dict[str, str]]) -> dict[str, int]:
+    """Build a simple severity summary for the correlation results."""
+
+    summary = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0}
+    for finding in findings:
+        severity = finding["severity"]
+        if severity in summary:
+            summary[severity] += 1
+    return summary
+
+
+def main() -> None:
+    """Run the fallback loader and Phase 6 correlation engine."""
+
+    log_info("Phase 6 correlation engine initialized.")
     seed_created = seed_data_if_needed()
     linux_data, windows_data = load_available_data()
+    known_machines = load_known_machines()
+    findings = correlate_events(known_machines, linux_data, windows_data)
+    summary = _summarize_findings(findings)
 
     if seed_created:
         log_info("Fallback seeding completed successfully.")
     else:
         log_info("Fallback seeding was not required because reusable data already existed.")
 
-    # Keep the main entry point lightweight so future phases can build on it.
+    # Emit a compact, readable summary so manual testing can confirm every rule.
     print(f"Linux records loaded: {len(linux_data)}")
     print(f"Windows records loaded: {len(windows_data)}")
+    print(f"Known machines loaded: {len(known_machines)}")
+    print(f"Findings total: {len(findings)}")
+    print(
+        "Severity counts: "
+        f"CRITICAL={summary['CRITICAL']} "
+        f"HIGH={summary['HIGH']} "
+        f"MEDIUM={summary['MEDIUM']}"
+    )
+
+    for finding in findings:
+        print(
+            f"{finding['severity']} | {finding['rule']} | "
+            f"{finding['ip']} | {finding['timestamp']} | {finding['username']}"
+        )
+        log_info(
+            f"{finding['severity']} finding recorded for {finding['ip']} "
+            f"via {finding['rule']}"
+        )
 
 
 if __name__ == "__main__":
