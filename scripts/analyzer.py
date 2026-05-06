@@ -1,4 +1,4 @@
-"""Phase 5 fallback system and data seeder for the pipeline.
+"""Phase 7 orchestrator, fallback system, and data seeder for the pipeline.
 
 This module keeps the logging foundation from Phase 2 and adds the fallback
 layer required for Phase 5. The new logic does two things:
@@ -16,10 +16,13 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
+import shutil
 
 
 # The repository keeps runtime logs in the shared logs directory.
@@ -446,15 +449,123 @@ def _summarize_findings(findings: list[dict[str, str]]) -> dict[str, int]:
     return summary
 
 
+def _resolve_shell(executable_names: list[str]) -> str | None:
+    """Return the first available shell or command executable from a candidate list."""
+
+    for candidate in executable_names:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
+
+
+def _run_collector(command: list[str], collector_name: str) -> bool:
+    """Run a collector subprocess and report success or failure safely."""
+
+    log_info(f"Starting {collector_name} collector.")
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=os.environ.copy(),
+        )
+    except FileNotFoundError as exc:
+        error_message = f"{collector_name} collector could not start: {exc}"
+        print(error_message)
+        log_error(error_message)
+        return False
+    except OSError as exc:
+        error_message = f"{collector_name} collector failed to launch: {exc}"
+        print(error_message)
+        log_error(error_message)
+        return False
+
+    # Forward any collector output so runtime diagnostics remain visible.
+    stdout_text = (completed.stdout or "").strip()
+    stderr_text = (completed.stderr or "").strip()
+    if stdout_text:
+        for line in stdout_text.splitlines():
+            log_info(f"{collector_name} stdout: {line}")
+    if stderr_text:
+        for line in stderr_text.splitlines():
+            log_warning(f"{collector_name} stderr: {line}")
+
+    if completed.returncode != 0:
+        error_message = (
+            f"{collector_name} collector exited with status {completed.returncode}. "
+            "Fallback data will be used."
+        )
+        print(error_message)
+        log_error(error_message)
+        return False
+
+    log_info(f"{collector_name} collector completed successfully.")
+    return True
+
+
+def _collectors_produced_data() -> bool:
+    """Check whether the collector output files are present and usable."""
+
+    return not _is_empty_file(LINUX_DATA_FILE) and not _is_empty_file(WINDOWS_DATA_FILE)
+
+
+def orchestrate_collection() -> tuple[bool, bool]:
+    """Run both collectors and fall back to the data directory when needed."""
+
+    log_info("Starting collector orchestration.")
+
+    linux_shell = _resolve_shell(["bash"])
+    windows_shell = _resolve_shell(["powershell", "pwsh"])
+
+    linux_success = False
+    windows_success = False
+
+    if linux_shell:
+        linux_success = _run_collector([linux_shell, "scripts/linux_collector.sh"], "Linux")
+    else:
+        print("Linux collector could not start because bash is unavailable.")
+        log_error("Linux collector could not start because bash is unavailable.")
+
+    if windows_shell:
+        windows_success = _run_collector(
+            [windows_shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/windows_collector.ps1"],
+            "Windows",
+        )
+    else:
+        print("Windows collector could not start because PowerShell is unavailable.")
+        log_error("Windows collector could not start because PowerShell is unavailable.")
+
+    if not linux_success or not windows_success:
+        log_warning("One or more collectors failed, activating fallback to data/.")
+
+    # If collectors did not produce usable files, let the fallback seeder recover safely.
+    fallback_seeded = False
+
+    if not _collectors_produced_data():
+        log_warning("Collector output is missing or empty after execution, using fallback data.")
+        fallback_seeded = seed_data_if_needed()
+
+    return linux_success and windows_success, fallback_seeded
+
+
 def main() -> None:
     """Run the fallback loader and Phase 6 correlation engine."""
 
-    log_info("Phase 6 correlation engine initialized.")
-    seed_created = seed_data_if_needed()
+    log_info("Phase 7 orchestrator initialized.")
+    orchestrated_success, seed_created = orchestrate_collection()
     linux_data, windows_data = load_available_data()
     known_machines = load_known_machines()
     findings = correlate_events(known_machines, linux_data, windows_data)
     summary = _summarize_findings(findings)
+
+    if not orchestrated_success:
+        log_warning("Collector orchestration completed with fallback support.")
+    else:
+        log_info("Collector orchestration completed successfully without fallback.")
 
     if seed_created:
         log_info("Fallback seeding completed successfully.")
