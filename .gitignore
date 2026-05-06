@@ -1,0 +1,4 @@
+# Keep transient Python bytecode and cache directories out of version control.
+__pycache__/
+*.pyc
+
