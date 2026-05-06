@@ -1,26 +1,20 @@
-"""Phase 7 orchestrator, fallback system, and data seeder for the pipeline.
+"""Runtime orchestration, fallback loading, correlation, and reporting.
 
-This module keeps the logging foundation from Phase 2 and adds the fallback
-layer required for Phase 5. The new logic does two things:
-
-1. Detects when collector output is missing or empty and loads data from the
-   repository's ``data`` directory instead of failing.
-2. Seeds realistic Linux and Windows test data only when the data directory is
-   completely empty, so later phases have predictable sample input.
-
-The actual correlation engine is intentionally deferred to a later phase.
+The pipeline attempts to collect system logs first. If those logs are not
+available, the existing files in ``data/`` are used as fallback input. When
+neither source contains usable logs, the program exits cleanly after logging a
+single clear error message.
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 import csv
 import json
 import logging
 import os
 import subprocess
-from dataclasses import dataclass
 from datetime import datetime
-from collections import defaultdict
 from pathlib import Path
 import shutil
 
@@ -30,7 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = BASE_DIR / "logs"
 LOG_FILE = LOG_DIR / "system.log"
 
-# The data directory stores both collector output and seeded fallback files.
+# The data directory stores collector output and fallback input files.
 DATA_DIR = BASE_DIR / "data"
 LINUX_DATA_FILE = DATA_DIR / "linux_data.json"
 WINDOWS_DATA_FILE = DATA_DIR / "windows_data.csv"
@@ -39,15 +33,6 @@ OUTPUT_REPORT_FILE = BASE_DIR / "output" / "final_security_report.txt"
 
 # A dedicated logger name keeps this configuration isolated from other modules.
 LOGGER_NAME = "multi_platform_log_correlation_pipeline"
-
-
-@dataclass(frozen=True)
-class SeedRecord:
-    """Describe one fallback record that should be emitted into the seed data."""
-
-    timestamp: str
-    username: str
-    ip: str
 
 
 def _build_logger() -> logging.Logger:
@@ -101,12 +86,6 @@ def log_error(message: str) -> None:
     _build_logger().error(message)
 
 
-def _ensure_data_directory() -> None:
-    """Create the data directory before any read or write operation."""
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-
 def _is_empty_file(path: Path) -> bool:
     """Return True when a file does not exist or contains no usable data."""
 
@@ -134,111 +113,27 @@ def _is_empty_file(path: Path) -> bool:
         return True
 
 
-def _data_folder_is_empty() -> bool:
-    """Check whether the repository data folder has any reusable content."""
-
-    if not DATA_DIR.exists():
-        return True
-
-    meaningful_entries = [
-        entry
-        for entry in DATA_DIR.iterdir()
-        if entry.name not in {".gitkeep"} and entry.is_file() and entry.stat().st_size > 0
-    ]
-    return not meaningful_entries
-
-
-def _seed_linux_records() -> list[SeedRecord]:
-    """Return realistic Linux failed-login records for testing fallback logic."""
-
-    return [
-        SeedRecord("May  6 08:11:01", "root", "203.0.113.10"),
-        SeedRecord("May  6 08:11:12", "root", "203.0.113.10"),
-        SeedRecord("May  6 08:11:23", "root", "203.0.113.10"),
-        SeedRecord("May  6 08:11:34", "root", "203.0.113.10"),
-        SeedRecord("May  6 08:11:45", "root", "203.0.113.10"),
-        SeedRecord("May  6 12:45:03", "alice", "198.51.100.42"),
-        SeedRecord("May  6 18:03:21", "svc-backup", "192.0.2.77"),
-        SeedRecord("May  6 22:17:08", "jdoe", "198.51.100.18"),
-    ]
-
-
-def _seed_windows_records() -> list[dict[str, str]]:
-    """Return realistic Windows failed-logon records for testing fallback logic."""
-
-    return [
-        {"TargetUserName": "root", "IpAddress": "203.0.113.10", "TimeCreated": "2026-05-06T08:11:01"},
-        {"TargetUserName": "root", "IpAddress": "203.0.113.10", "TimeCreated": "2026-05-06T08:11:12"},
-        {"TargetUserName": "alice", "IpAddress": "198.51.100.42", "TimeCreated": "2026-05-06T12:45:03"},
-        {"TargetUserName": "svc-backup", "IpAddress": "192.0.2.77", "TimeCreated": "2026-05-06T18:03:21"},
-        {"TargetUserName": "jdoe", "IpAddress": "198.51.100.18", "TimeCreated": "2026-05-06T22:17:08"},
-    ]
-
-
-def seed_data_if_needed() -> bool:
-    """Seed realistic Linux and Windows test data when the folder is empty.
-
-    Returns True when seeding happened so callers can report the fallback path.
-    """
-
-    _ensure_data_directory()
-
-    if not _data_folder_is_empty():
-        return False
-
-    log_warning("Data folder is empty, creating fallback seed data for testing.")
-
-    linux_seed = [
-        {
-            "timestamp": record.timestamp,
-            "username": record.username,
-            "ip": record.ip,
-        }
-        for record in _seed_linux_records()
-    ]
-    windows_seed = _seed_windows_records()
-
-    LINUX_DATA_FILE.write_text(
-        json.dumps(linux_seed, indent=2),
-        encoding="utf-8",
-    )
-
-    with WINDOWS_DATA_FILE.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["TargetUserName", "IpAddress", "TimeCreated"])
-        writer.writeheader()
-        writer.writerows(windows_seed)
-
-    log_info("Seeded fallback Linux JSON and Windows CSV data into the data folder.")
-    return True
-
-
 def load_linux_data() -> list[dict[str, str]]:
-    """Load Linux collector data, falling back to seeded data when required."""
+    """Load Linux collector data from the existing JSON file, if present."""
 
-    if _is_empty_file(LINUX_DATA_FILE):
-        log_warning("Linux collector output is missing or empty, using fallback data.")
-        seed_data_if_needed()
-
-    if _is_empty_file(LINUX_DATA_FILE):
-        log_error("Unable to load Linux data because no usable dataset is available.")
+    if not LINUX_DATA_FILE.exists() or _is_empty_file(LINUX_DATA_FILE):
         return []
 
     try:
-        return json.loads(LINUX_DATA_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(LINUX_DATA_FILE.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            return payload
+        log_error(f"Linux data file has unexpected structure: {LINUX_DATA_FILE}")
+        return []
     except (OSError, json.JSONDecodeError) as exc:
         log_error(f"Failed to load Linux JSON data: {exc}")
         return []
 
 
 def load_windows_data() -> list[dict[str, str]]:
-    """Load Windows collector data, falling back to seeded data when required."""
+    """Load Windows collector data from the existing CSV file, if present."""
 
-    if _is_empty_file(WINDOWS_DATA_FILE):
-        log_warning("Windows collector output is missing or empty, using fallback data.")
-        seed_data_if_needed()
-
-    if _is_empty_file(WINDOWS_DATA_FILE):
-        log_error("Unable to load Windows data because no usable dataset is available.")
+    if not WINDOWS_DATA_FILE.exists() or _is_empty_file(WINDOWS_DATA_FILE):
         return []
 
     try:
@@ -339,7 +234,7 @@ def correlate_events(
     linux_data: list[dict[str, str]],
     windows_data: list[dict[str, str]],
 ) -> list[dict[str, str]]:
-    """Apply the Phase 6 correlation rules to the combined event stream."""
+    """Apply the correlation rules to the combined event stream."""
 
     events = _build_event_stream(linux_data, windows_data)
     failed_attempts_by_ip: dict[str, int] = defaultdict(int)
@@ -536,7 +431,7 @@ def generate_final_security_report(
     windows_count: int,
     known_machine_count: int,
 ) -> Path:
-    """Write the Phase 8 report to disk in a readable, structured format."""
+    """Write the final report to disk in a readable, structured format."""
 
     OUTPUT_REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
     report_lines = _build_report_lines(
@@ -642,41 +537,35 @@ def orchestrate_collection() -> tuple[bool, bool]:
         log_error("Windows collector could not start because PowerShell is unavailable.")
 
     if not linux_success or not windows_success:
-        log_warning("One or more collectors failed, activating fallback to data/.")
+        log_warning("One or more collectors failed, checking data/ for fallback input.")
 
-    # If collectors did not produce usable files, let the fallback seeder recover safely.
-    fallback_seeded = False
-
-    if not _collectors_produced_data():
-        log_warning("Collector output is missing or empty after execution, using fallback data.")
-        fallback_seeded = seed_data_if_needed()
-
-    return linux_success and windows_success, fallback_seeded
+    return linux_success and windows_success, _collectors_produced_data()
 
 
-def main() -> None:
-    """Run the fallback loader and Phase 6 correlation engine."""
+def main() -> int:
+    """Run collection, fallback loading, correlation, and report generation."""
 
-    log_info("Phase 7 orchestrator initialized.")
-    orchestrated_success, seed_created = orchestrate_collection()
+    log_info("Orchestrator initialized.")
+    orchestrated_success, collectors_produced_data = orchestrate_collection()
     linux_data, windows_data = load_available_data()
-    known_machines = load_known_machines()
-    findings = correlate_events(known_machines, linux_data, windows_data)
-    summary = _summarize_findings(findings)
+
+    if not linux_data and not windows_data:
+        log_error("No log files found in system or data folder")
+        return 1
 
     if not orchestrated_success:
-        log_warning("Collector orchestration completed with fallback support.")
-    else:
-        log_info("Collector orchestration completed successfully without fallback.")
-
-    if seed_created:
-        log_info("Fallback seeding completed successfully.")
-    else:
-        log_info("Fallback seeding was not required because reusable data already existed.")
+        log_warning("System collectors were incomplete; using available data files from data/.")
+    elif not collectors_produced_data:
+        log_warning("System collectors did not produce usable output; using data/ fallback input.")
 
     # Emit a compact, readable summary so manual testing can confirm every rule.
     print(f"Linux records loaded: {len(linux_data)}")
     print(f"Windows records loaded: {len(windows_data)}")
+
+    known_machines = load_known_machines()
+    findings = correlate_events(known_machines, linux_data, windows_data)
+    summary = _summarize_findings(findings)
+
     print(f"Known machines loaded: {len(known_machines)}")
     print(f"Findings total: {len(findings)}")
     print(
@@ -705,6 +594,8 @@ def main() -> None:
             f"via {finding['rule']}"
         )
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
